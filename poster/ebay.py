@@ -1,11 +1,14 @@
 # poster/ebay.py
 import base64
 import time
+import uuid
 from urllib.parse import urlencode
 
 import httpx
 
-from poster.exceptions import AuthError
+from poster.exceptions import AuthError, ListingError
+from poster.media import upload_photos
+from poster.models import Listing
 
 
 EBAY_OAUTH_SCOPES = [
@@ -113,4 +116,147 @@ class EbayClient:
         return {
             "access_token": data["access_token"],
             "refresh_token": data["refresh_token"],
+        }
+
+    def _generate_sku(self, listing: Listing) -> str:
+        short_id = uuid.uuid4().hex[:8]
+        return f"{listing.team}-{listing.year}-{short_id}".upper()
+
+    def _to_inventory_item(self, listing: Listing, image_urls: list[str]) -> dict:
+        aspects = {
+            "Brand": [listing.brand],
+            "Size": [listing.size],
+            "Team": [listing.team],
+        }
+        if listing.type:
+            aspects["Type"] = [listing.type]
+
+        product = {
+            "title": listing.title,
+            "imageUrls": image_urls,
+            "aspects": aspects,
+            "brand": listing.brand,
+        }
+        if listing.description:
+            product["description"] = listing.description
+
+        return {
+            "availability": {
+                "shipToLocationAvailability": {"quantity": 1}
+            },
+            "condition": listing.condition,
+            "product": product,
+        }
+
+    def _to_offer(
+        self,
+        listing: Listing,
+        sku: str,
+        category_id: str,
+        policies: dict,
+        location_key: str,
+    ) -> dict:
+        offer = {
+            "sku": sku,
+            "marketplaceId": "EBAY_US",
+            "format": "FIXED_PRICE",
+            "availableQuantity": 1,
+            "categoryId": category_id,
+            "listingDuration": "GTC",
+            "listingPolicies": {
+                "fulfillmentPolicyId": policies["fulfillment_policy_id"],
+                "paymentPolicyId": policies["payment_policy_id"],
+                "returnPolicyId": policies["return_policy_id"],
+            },
+            "merchantLocationKey": location_key,
+            "pricingSummary": {
+                "price": {
+                    "currency": "USD",
+                    "value": f"{listing.price:.2f}",
+                },
+            },
+        }
+        if listing.best_offer:
+            offer["listingPolicies"]["bestOfferTerms"] = {"bestOfferEnabled": True}
+        return offer
+
+    def _create_inventory_item(
+        self, sku: str, listing: Listing, image_urls: list[str]
+    ) -> None:
+        url = f"{self.api_base}/sell/inventory/v1/inventory_item/{sku}"
+        payload = self._to_inventory_item(listing, image_urls)
+        response = httpx.put(url, headers=self._auth_headers(), json=payload)
+        if response.status_code not in (200, 204):
+            raise ListingError(
+                f"Failed to create inventory item: {response.text}"
+            )
+
+    def _create_offer(
+        self,
+        listing: Listing,
+        sku: str,
+        category_id: str,
+        policies: dict,
+        location_key: str,
+    ) -> str:
+        url = f"{self.api_base}/sell/inventory/v1/offer"
+        payload = self._to_offer(listing, sku, category_id, policies, location_key)
+        response = httpx.post(url, headers=self._auth_headers(), json=payload)
+        if response.status_code not in (200, 201):
+            raise ListingError(f"Failed to create offer: {response.text}")
+        return response.json()["offerId"]
+
+    def _publish_offer(self, offer_id: str) -> str:
+        url = f"{self.api_base}/sell/inventory/v1/offer/{offer_id}/publish"
+        response = httpx.post(url, headers=self._auth_headers())
+        if response.status_code != 200:
+            raise ListingError(f"Failed to publish offer: {response.text}")
+        return response.json()["listingId"]
+
+    def post_listing(
+        self,
+        listing: Listing,
+        category_id: str,
+        policies: dict,
+        location_key: str,
+        dry_run: bool = False,
+    ) -> dict:
+        sku = self._generate_sku(listing)
+
+        # Upload photos
+        image_urls = upload_photos(
+            photos=listing.photos,
+            access_token=self._ensure_token(),
+            media_base=self._media_base,
+        )
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "sku": sku,
+                "title": listing.title,
+                "price": listing.price,
+                "image_count": len(image_urls),
+                "inventory_payload": self._to_inventory_item(listing, image_urls),
+                "offer_payload": self._to_offer(
+                    listing, sku, category_id, policies, location_key
+                ),
+            }
+
+        # Create inventory item
+        self._create_inventory_item(sku, listing, image_urls)
+
+        # Create offer
+        offer_id = self._create_offer(
+            listing, sku, category_id, policies, location_key
+        )
+
+        # Publish
+        listing_id = self._publish_offer(offer_id)
+
+        return {
+            "listing_id": listing_id,
+            "sku": sku,
+            "offer_id": offer_id,
+            "url": f"https://www.ebay.com/itm/{listing_id}",
         }
