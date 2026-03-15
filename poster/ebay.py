@@ -120,7 +120,8 @@ class EbayClient:
 
     def _generate_sku(self, listing: Listing) -> str:
         short_id = uuid.uuid4().hex[:8]
-        return f"{listing.team}-{listing.year}-{short_id}".upper()
+        team = listing.team.replace(" ", "-")
+        return f"{team}-{listing.year}-{short_id}".upper()
 
     def _to_inventory_item(self, listing: Listing, image_urls: list[str]) -> dict:
         aspects = {
@@ -223,25 +224,26 @@ class EbayClient:
     ) -> dict:
         sku = self._generate_sku(listing)
 
+        if dry_run:
+            placeholder_urls = [f"<local:{p.name}>" for p in listing.photos]
+            return {
+                "dry_run": True,
+                "sku": sku,
+                "title": listing.title,
+                "price": listing.price,
+                "image_count": len(listing.photos),
+                "inventory_payload": self._to_inventory_item(listing, placeholder_urls),
+                "offer_payload": self._to_offer(
+                    listing, sku, category_id, policies, location_key
+                ),
+            }
+
         # Upload photos
         image_urls = upload_photos(
             photos=listing.photos,
             access_token=self._ensure_token(),
             media_base=self._media_base,
         )
-
-        if dry_run:
-            return {
-                "dry_run": True,
-                "sku": sku,
-                "title": listing.title,
-                "price": listing.price,
-                "image_count": len(image_urls),
-                "inventory_payload": self._to_inventory_item(listing, image_urls),
-                "offer_payload": self._to_offer(
-                    listing, sku, category_id, policies, location_key
-                ),
-            }
 
         # Create inventory item
         self._create_inventory_item(sku, listing, image_urls)

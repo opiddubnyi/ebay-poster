@@ -121,3 +121,17 @@ def test_publish_offer_failure(client):
     )
     with pytest.raises(ListingError, match="Failed to publish"):
         client._publish_offer("999")
+
+
+def test_generate_sku_no_spaces(client):
+    listing = Listing(
+        team="Manchester United",
+        year="1999",
+        brand="Umbro",
+        size="L",
+        price=300.0,
+        photos=[Path("test.jpg")],
+    )
+    sku = client._generate_sku(listing)
+    assert " " not in sku
+    assert "MANCHESTER-UNITED" in sku
